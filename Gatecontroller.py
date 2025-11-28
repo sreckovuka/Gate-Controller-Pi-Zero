@@ -8,7 +8,7 @@ import BlynkLib
 
 # ---------------- CONFIG ----------------
 VERSION = "GateController v4.0"
-BLYNK_AUTH_TOKEN = 'qqtZ0ew0Q0gc65yeIZ836sQoIs1D8xTSa1'
+BLYNK_AUTH_TOKEN = 'qxxxxxxx1'
 RELAY_PIN = 21
 REED_PIN = 20
 SCHEDULE_FILE = "schedule.json"
