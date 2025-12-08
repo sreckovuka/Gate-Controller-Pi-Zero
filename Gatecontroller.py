@@ -21,7 +21,7 @@ reed = DigitalInputDevice(REED_PIN, pull_up=True)  # 0=closed, 1=open
 relay_lock = threading.Lock()
 
 # ---------------- BLYNK ----------------
-blynk = BlynkLib.Blynk(BLYNK_AUTH_TOKEN)
+blynk = BlynkLib.Blynk(BLYNK_AUTH_TOKEN,heartbeat=7)
 
 # ---------------- SCHEDULE ----------------
 schedule = {"enabled": True, "open_time": "07:00", "close_time": "19:00"}
