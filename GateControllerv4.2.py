@@ -4,16 +4,18 @@ import threading, time, json, os
 from datetime import datetime
 from flask import Flask, render_template_string, request, redirect, jsonify
 from gpiozero import DigitalOutputDevice, DigitalInputDevice
-import BlynkLib  # make sure this is the patched safe version
+import BlynkLib
 
 # ---------------- CONFIG ----------------
 VERSION = "GateController v5.0"
-BLYNK_AUTH_TOKEN = 'qtZ0'
+BLYNK_AUTH_TOKEN = 'xxxyyyyzzz'
 RELAY_PIN = 21
 REED_PIN = 20
 SCHEDULE_FILE = "schedule.json"
 LOG_FILE = "gate_log.txt"
 RELAY_DURATION = 1.0  # seconds
+RECONNECT_INTERVAL = 30  # seconds
+BLYNK_KEEPALIVE_INTERVAL = 5  # seconds
 
 # ---------------- HARDWARE ----------------
 relay = DigitalOutputDevice(RELAY_PIN, active_high=False, initial_value=True)  # HIGH=OFF
@@ -21,7 +23,9 @@ reed = DigitalInputDevice(REED_PIN, pull_up=True)  # 0=closed, 1=open
 relay_lock = threading.Lock()
 
 # ---------------- BLYNK ----------------
-blynk = BlynkLib.Blynk(BLYNK_AUTH_TOKEN, heartbeat=7)  # Heartbeat keeps blynk open prevent app going offline
+blynk = BlynkLib.Blynk(BLYNK_AUTH_TOKEN,heartbeat=7)
+blynk_connected_flag = False
+last_reconnect = 0
 
 # ---------------- SCHEDULE ----------------
 schedule = {"enabled": True, "open_time": "07:00", "close_time": "19:00"}
@@ -46,8 +50,9 @@ last_triggered = {
 # ---------------- SAFE BLYNK WRITE ----------------
 def safe_blynk_write(pin, value):
     try:
-        blynk.virtual_write(pin, value)
-    except Exception as e:
+        if blynk_connected_flag:
+            blynk.virtual_write(pin, value)
+    except (BrokenPipeError, ConnectionResetError, AttributeError, OSError) as e:
         print(f"[BLYNK WRITE ERROR] Pin {pin} Value {value}: {e}")
 
 # ---------------- LOG ----------------
@@ -115,7 +120,7 @@ def close_gate(trigger="manual"):
         log(f"Gate CLOSE skipped (already closed) [{trigger}]")
     push_relay_status()
 
-# ---------------- REED CHANGE HANDLER + NOTIFICATIONS ----------------
+# ---------------- REED CHANGE HANDLER ----------------
 def reed_changed():
     global _last_reed_state
     current = is_gate_open()
@@ -150,7 +155,15 @@ def handle_blynk_control(value):
 
 @blynk.on("connected")
 def blynk_connected():
+    global blynk_connected_flag
+    blynk_connected_flag = True
     log("Raspberry Pi Connected to Blynk", push=False)
+
+@blynk.on("disconnected")
+def blynk_disconnected():
+    global blynk_connected_flag
+    blynk_connected_flag = False
+    log("Blynk Disconnected", push=False)
 
 # ---------------- FLASK ----------------
 app = Flask(__name__)
@@ -177,6 +190,7 @@ def index():
         <p>Current Time: <span id="now_time">{{now_time}}</span></p>
         <p>Gate Status: <span id="gate_status" class="status">{{ "OPEN" if gate else "CLOSED" }}</span></p>
         <p>Relay Status: <span id="relay_status" class="status">{{ "ON" if relay else "OFF" }}</span></p>
+        <p>Blynk Status: <span id="blynk_status" class="status">{{ "CONNECTED" if blynk else "DISCONNECTED" }}</span></p>
 
         <div class="d-flex gap-2 my-2">
             <form action="/open" method="post"><button id="open_btn" type="submit" class="btn btn-success btn-lg rounded-pill flex-fill">OPEN</button></form>
@@ -212,6 +226,9 @@ def index():
                 document.getElementById('relay_status').innerHTML = data.relay ? "ON" : "OFF";
                 document.getElementById('relay_status').style.color = data.relay ? "green" : "gray";
 
+                document.getElementById('blynk_status').innerHTML = data.blynk ? "CONNECTED" : "DISCONNECTED";
+                document.getElementById('blynk_status').style.color = data.blynk ? "green" : "red";
+
                 document.getElementById('log').innerText = data.log;
                 document.getElementById('now_time').innerHTML = data.current_time;
 
@@ -224,7 +241,7 @@ def index():
     </body>
     </html>
     """, version=VERSION, now_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-       gate=is_gate_open(), relay=not relay.value,
+       gate=is_gate_open(), relay=not relay.value, blynk=blynk_connected_flag,
        schedule=schedule, log_content=get_last_logs(10))
 
 @app.route("/status")
@@ -232,6 +249,7 @@ def status():
     return jsonify({
         "gate": is_gate_open(),
         "relay": not relay.value,
+        "blynk": blynk_connected_flag,
         "log": get_last_logs(10),
         "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     })
@@ -279,17 +297,33 @@ def schedule_worker():
         time.sleep(2)
 
 def blynk_loop():
+    global last_reconnect, blynk_connected_flag
     while True:
         try:
             blynk.run()
-            time.sleep(0.05)  # prevent busy-loop
         except Exception as e:
             print(f"[BLYNK LOOP ERROR] {e}")
-            time.sleep(0.5)
+            blynk_connected_flag = False
+            now_time = time.time()
+            if now_time - last_reconnect > RECONNECT_INTERVAL:
+                try:
+                    blynk.disconnect()
+                    blynk.connect()
+                    last_reconnect = now_time
+                except Exception as e2:
+                    print(f"[BLYNK RECONNECT FAILED] {e2}")
+            time.sleep(1)
+
+def blynk_keepalive_worker():
+    while True:
+        if blynk_connected_flag:
+            safe_blynk_write(99, 0)  # keep alive
+        time.sleep(BLYNK_KEEPALIVE_INTERVAL)
 
 # ---------------- START THREADS ----------------
 threading.Thread(target=blynk_loop, daemon=True).start()
 threading.Thread(target=schedule_worker, daemon=True).start()
+threading.Thread(target=blynk_keepalive_worker, daemon=True).start()
 
 # ---------------- RUN FLASK ----------------
 if __name__ == "__main__":
